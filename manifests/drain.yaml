@@ -1,0 +1,101 @@
+# A server whose request handler holds a request open for SLEEP_S seconds (a long-
+# generation stand-in) then returns "done". Its SIGTERM behavior is set by MODE:
+#   none  - no handler (as PID 1, this ignores SIGTERM)
+#   exit  - handler exits immediately (the naive, request-dropping pattern)
+#   drain - handler lets the in-flight request finish, then exits
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: drain-src
+data:
+  server.py: |
+    import http.server
+    import os
+    import signal
+    import time
+
+    MODE = os.environ.get("MODE", "none")
+    SLEEP_S = float(os.environ.get("SLEEP_S", "12"))
+    flag = {"drain": False}
+
+    def on_drain(signum, frame):
+        flag["drain"] = True
+
+    def on_exit(signum, frame):
+        os._exit(1)
+
+    if MODE == "drain":
+        signal.signal(signal.SIGTERM, on_drain)
+    elif MODE == "exit":
+        signal.signal(signal.SIGTERM, on_exit)
+
+    class H(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):
+            time.sleep(SLEEP_S)
+            self.send_response(200)
+            self.end_headers()
+            self.wfile.write(b"done\n")
+            if flag["drain"]:
+                os._exit(0)
+
+        def log_message(self, *a):
+            pass
+
+    http.server.HTTPServer(("", 7070), H).serve_forever()
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: drain
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: drain
+  template:
+    metadata:
+      labels:
+        app: drain
+    spec:
+      terminationGracePeriodSeconds: 30
+      containers:
+        - name: s
+          image: python:3.11-slim
+          command: ["python", "-u", "/app/server.py"]
+          env:
+            - name: MODE
+              value: "none"
+            - name: SLEEP_S
+              value: "12"
+          ports:
+            - containerPort: 7070
+          volumeMounts:
+            - name: src
+              mountPath: /app
+      volumes:
+        - name: src
+          configMap:
+            name: drain-src
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: drain
+spec:
+  selector:
+    app: drain
+  ports:
+    - port: 7070
+      targetPort: 7070
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: loadcli
+  labels:
+    app: loadcli
+spec:
+  containers:
+    - name: c
+      image: curlimages/curl:8.11.0
+      command: ["sleep", "36000"]
