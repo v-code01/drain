@@ -1,0 +1,51 @@
+# Every claim drain makes, each tied to the artifact that proves it.
+# Verify integrity with ./scripts/gate.sh; reproduce with ./reproduce.sh.
+
+[project]
+name = "drain"
+summary = "What happens to an in-flight long request (a stand-in for a long LLM generation, a 12 s handler) when its Kubernetes pod is deleted, measured on a real single-node cluster (minikube) across three SIGTERM behaviors and two grace periods. The grace period is a hard deadline: for servers that do not die on SIGTERM (no-handler and drain), the 12 s request completes at a 30 s grace period but is SIGKILLed mid-stream at a 4 s grace period. 'Handle SIGTERM by exiting' (the exit mode) drops the request at both grace periods, instantly. A no-handler server counterintuitively IGNORES SIGTERM because as PID 1 the kernel does not apply the default signal disposition - it survives to the grace deadline, the reverse of the common assumption. A drain handler exits early (9 s, right after the request) while the no-handler server lingers the full 31 s grace period until SIGKILL. Serving long generations therefore requires terminationGracePeriodSeconds longer than the longest generation plus a real drain handler, not the naive exit-on-SIGTERM."
+language = "Python"
+license = "MIT"
+oracles = "the client's own curl exit code and response body (exit 0 with the `done` marker = completed; a reset, truncated, or timed-out stream = dropped), and the pod shutdown time from the delete call to the pod disappearing. The request targets the pod IP directly so it is served by exactly the deleted pod. results/trials.jsonl records every raw outcome and shutdown time. tools/verify.py re-classifies and recomputes with its own logic, sharing no code with src or analyze.py. No LLM judge."
+
+[[claim]]
+id = "pre-registered-prediction"
+statement = "Four predictions were committed to git in PREREG.md before the run - the grace period is a hard deadline (P1), exit-on-SIGTERM always drops (P2), a no-handler PID-1 server ignores SIGTERM (P3), drain terminates early while no-handler lingers (P4) - and all four held. PREREG.md is not edited after results."
+evidence = "PREREG.md (committed before results); README pre-registration section; bench_results/frontier.md."
+status = "verified"
+
+[[claim]]
+id = "grace-is-a-hard-deadline"
+statement = "For servers that do not die on SIGTERM (no-handler and drain), the 12 s in-flight request completes at a 30 s grace period (> 12) but is SIGKILLed mid-stream at a 4 s grace period (< 12) - the grace period is a hard deadline on generation length, regardless of how gracefully the server shuts down. Serving a length-T generation requires terminationGracePeriodSeconds > T (the default is 30 s)."
+evidence = "bench_results/frontier.md none/drain completion_rate 1.0 at grace 30, 0.0 at grace 4; tools/verify.py asserts this."
+status = "verified"
+
+[[claim]]
+id = "exit-on-sigterm-drops"
+statement = "The exit mode - a handler that exits on SIGTERM, a very common pattern - drops the in-flight request at both grace periods (completion rate 0.0), dying the instant SIGTERM arrives (shutdown ~1 s). A longer grace period does not help; the request is thrown away immediately."
+evidence = "bench_results/frontier.md exit completion_rate 0.0 at both graces, shutdown ~1 s; tools/verify.py asserts exit drops at both graces."
+status = "verified"
+
+[[claim]]
+id = "pid1-ignores-sigterm"
+statement = "A server with no SIGTERM handler does NOT die on SIGTERM: as PID 1 in the container the kernel does not apply the default signal disposition, so unhandled SIGTERM is ignored. The none server survives, completes the request at a 30 s grace period, and is stopped only by SIGKILL at grace expiry - the reverse of the common assumption and the opposite of the exit mode."
+evidence = "bench_results/frontier.md none completion_rate 1.0 at grace 30 and shutdown ~31 s (lingers to SIGKILL); tools/verify.py asserts none completes at grace > sleep."
+status = "verified"
+
+[[claim]]
+id = "drain-exits-early"
+statement = "With a 30 s grace period, the drain server exits 9.0 s after delete (the ~8 s of request left after the 4 s delete, plus ~1 s to observe the pod gone; it drained then quit) while the none server lingers the full 31 s until SIGKILL. Both complete the request, but only drain releases the pod as soon as its work is done."
+evidence = "bench_results/frontier.md drain grace 30 mean_shutdown 9.0 s vs none 31.4 s; tools/verify.py asserts drain shutdown is well below the grace and none's is near the full grace."
+status = "verified"
+
+[[claim]]
+id = "no-overclaim"
+statement = "One cluster (minikube, single node), a fixed sleep as a generation stand-in (not a real model), one client, 3 deterministic trials per cell (completion 0.00/1.00 in every cell). This isolates the SIGTERM / grace-period / drain interaction; it is not a rolling-update, PodDisruptionBudget, or streaming-response study. An early run showed a pod-lifecycle race (a stray request served by a replacement pod); the shipped runner targets the pod IP directly and waits for exactly one Ready pod, removing it."
+evidence = "README limitations + falsifiers; REVIEW.md"
+status = "verified"
+
+[[claim]]
+id = "clean-build"
+statement = "The analysis is ruff-clean and mypy --strict clean, the outcome classifier has unit tests (completed/dropped by exit code and body, completion rate, mean), sources are pure ASCII, the independent verify passes, and no private operating-environment details (host, port, model endpoint) are present in tracked files."
+evidence = "scripts/gate.sh."
+status = "verified"
